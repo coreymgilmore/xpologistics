@@ -17,6 +17,7 @@ package xpo
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -122,7 +123,7 @@ type PkupItem struct {
 
 	//optional
 	DestZip6       string `json:"destZip6"` //ship to zip/postal code
-	LoosePiecesCnt uint   `json:"loostPiecesCnt"`
+	LoosePiecesCnt uint   `json:"loosePiecesCnt"`
 	PalletCnt      uint   `json:"palletCnt"`
 	GarntInd       bool   `json:"garntInd"` //guaranteed service
 	HazmatInd      bool   `json:"hazmatInd"`
@@ -145,6 +146,17 @@ type SuccessfulPickupResponse struct {
 	Data                 struct {
 		ConfirmationNbr string `json:"confirmationNbr"` //pickup confirmation number
 	} `json:"data"`
+}
+
+//ErrorPickupResponse is the data returned when a pickup cannot be scheduled
+//XPO API takes in JSON but returns XML upon error
+//each field starts with "am:" but that can be excluded from struct tags
+type ErrorPickupResponse struct {
+	XMLName     xml.Name `xml:"fault"`
+	Code        string   `xml:"code"`
+	Type        string   `xml:"type"`
+	Message     string   `xml:"message"`
+	Description string   `xml:"description"`
 }
 
 //SetProductionMode chooses the production url for use
@@ -182,7 +194,7 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 	}
 	res, err := httpClient.Post(xpoURL, "application/json", bytes.NewReader(jsonBytes))
 	if err != nil {
-		errors.Wrap(err, "xpo.RequestPickup - could not make post request")
+		err = errors.Wrap(err, "xpo.RequestPickup - could not make post request")
 		return
 	}
 
@@ -190,13 +202,24 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 	defer res.Body.Close()
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		errors.Wrap(err, "xpo.RequestPickup - could not read response")
+		err = errors.Wrap(err, "xpo.RequestPickup - could not read response")
 		return
 	}
 
 	err = json.Unmarshal(body, &response)
 	if err != nil {
-		errors.Wrap(err, "xpo.RequestPickup - could not unmarshal response")
+		//data might not be json, might be xml error
+		//try unmarshaling to error xml
+		var errorData ErrorPickupResponse
+		err = xml.Unmarshal(body, &errorData)
+		if err != nil {
+			err = errors.Wrap(err, "xpo.RequestPickup - could not unmarshal response")
+			return
+		}
+
+		//return our error so we know where this error came from, and UPS error message so we know what to fix
+		log.Printf("%+v", errorData)
+		err = errors.New(errorData.Description)
 		return
 	}
 
@@ -206,8 +229,8 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 		log.Println("xpo.RequestPickup - pickup request failed")
 		log.Println(string(body))
 
-		var errorData map[string]interface{}
-		json.Unmarshal(body, &errorData)
+		var errorData ErrorPickupResponse
+		xml.Unmarshal(body, &errorData)
 
 		//return our error so we know where this error came from, and UPS error message so we know what to fix
 		err = errors.New("xpo.RequestPickup - pickup request failed")
