@@ -1,6 +1,12 @@
 /*Package xpo provides tooling to connect to the XPO Logistics API.  This is for truck shipments,
-not small parcels.  Think LTL (less than truckload) shipments.  This code was created off the UPS API
-documentation.  This uses UPS's JSON API.
+not small parcels.  Think LTL (less than truckload) shipments.  This code was created off the XPO API
+documentation.
+
+The XPO API requires two steps in making the first request per usage.  The first request gets a "bearer"
+token which is used in following requests that actually do something (like scheduling a pickup).  Why the API
+is designed this way, who knows, but it is dumb.  The "bearer" token is valid for 12 hours so you can reuse it
+and thus only have to make one request for future requests (up until 12 hours from the initial request that
+got the "bearer" token).
 
 Currently this package can perform:
 - pickup requests
@@ -21,6 +27,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/pkg/errors"
@@ -28,6 +35,7 @@ import (
 
 //api urls
 const (
+	xpoTokenURL      = "https://api.ltl.xpo.com/token"
 	xpoTestURL       = "https://api.ltl.xpo.com/1.0/cust-pickup-requests"
 	xpoProductionURL = "https://api.ltl.xpo.com/1.0/cust-pickup-requests?testMode=Y"
 )
@@ -42,6 +50,18 @@ var xpoURL = xpoTestURL
 //You may need to adjust this based on how slow connecting to XPO is for you.
 //10 seconds is overly long, but sometimes XPO is very slow.
 var timeout = time.Duration(10 * time.Second)
+
+//our xpo credentials
+//these must be set in SetCredentials() prior to making requests
+var (
+	//website login
+	username string
+	password string
+
+	//accessToken is the token we use to retrieve other tokens to make api calls
+	//This token should be kept secret and lasts until it is revoked.
+	accessToken string
+)
 
 //role codes for what the requestor of the pickup is in relation to this shipment
 var (
@@ -159,6 +179,15 @@ type ErrorPickupResponse struct {
 	Description string   `xml:"description"`
 }
 
+//TokenResponse is the data returned when we retrieve the bearer token
+type TokenResponse struct {
+	BearerToken  string `json:"access_token"`  //not the same as our account access token even though xpo sometimes calls them the same thing
+	RefreshToken string `json:"refresh_token"` //some other token, used to get a new pair of bearer & access tokens
+	Scope        string `json:"scope"`         //default
+	TokenType    string `json:"token_type"`    //Bearer
+	ExpiresIn    uint   `json:"expires_in"`    //43200
+}
+
 //SetProductionMode chooses the production url for use
 func SetProductionMode(yes bool) {
 	if yes {
@@ -174,7 +203,16 @@ func SetTimeout(seconds time.Duration) {
 	return
 }
 
+//SetCredentials saves our XPO username, password, access token for use later.
+func SetCredentials(u, p, t string) {
+	username = u
+	password = p
+	accessToken = t
+	return
+}
+
 //RequestPickup performs the API call to schedule a pickup
+//requests to XPO require two steps: getting a token, and making the pickup request.  Why? b/c dumb.
 func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, err error) {
 	//add the pickup request info to the pickup container object
 	pr := PickupRequest{
@@ -188,11 +226,24 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 		return
 	}
 
+	//get the token
+	if username == "" || password == "" || accessToken == "" {
+		err = errors.New("xpo.RequestPickup - no access token was provided via SetCredentials()")
+	}
+	bearerToken, err := getRequestToken()
+	if err != nil {
+		err = errors.Wrap(err, "xpo.RequestPickup - could not get token")
+		return
+	}
+
 	//make the call to XPO
 	httpClient := http.Client{
 		Timeout: timeout,
 	}
-	res, err := httpClient.Post(xpoURL, "application/json", bytes.NewReader(jsonBytes))
+	req, err := http.NewRequest("POST", xpoURL, bytes.NewReader(jsonBytes))
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := httpClient.Do(req)
 	if err != nil {
 		err = errors.Wrap(err, "xpo.RequestPickup - could not make post request")
 		return
@@ -241,5 +292,55 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 	//pickup request successful
 	//response data will have confirmation number
 	//an email should also have been sent to the requester email
+	return
+}
+
+//getRequestToken gets a "bearer" token we can use to make a request to the pickup api
+//We request this temporary token using our permanent access token.
+func getRequestToken() (bearerToken string, err error) {
+	httpClient := http.Client{
+		Timeout: timeout,
+	}
+
+	//values that must be passed during this request
+	v := url.Values{}
+	v.Add("grant_type", "password")
+	v.Add("username", username)
+	v.Add("password", password)
+
+	//build the request
+	//headers set per xpo
+	req, err := http.NewRequest("POST", xpoTokenURL, bytes.NewBufferString(v.Encode()))
+	req.Header.Set("Authorization", "Basic "+accessToken)
+	req.Header.Set("Content-Type", "x-www-form-urlencoded")
+
+	//make the request
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return
+	}
+
+	//parse the response
+	defer res.Body.Close()
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return
+	}
+
+	var responseData TokenResponse
+	err = json.Unmarshal(body, &responseData)
+	if err != nil {
+		return
+	}
+
+	//make sure we got a bearer token back
+	bearerToken = responseData.BearerToken
+	if bearerToken == "" {
+		log.Println(string(body))
+		err = errors.New("could not get bearer token from response body")
+		return
+	}
+
+	//return the token
 	return
 }
