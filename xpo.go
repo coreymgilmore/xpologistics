@@ -36,8 +36,8 @@ import (
 //api urls
 const (
 	xpoTokenURL      = "https://api.ltl.xpo.com/token"
-	xpoTestURL       = "https://api.ltl.xpo.com/1.0/cust-pickup-requests"
-	xpoProductionURL = "https://api.ltl.xpo.com/1.0/cust-pickup-requests?testMode=Y"
+	xpoProductionURL = "https://api.ltl.xpo.com/1.0/cust-pickup-requests"
+	xpoTestURL       = "https://api.ltl.xpo.com/1.0/cust-pickup-requests?testMode=Y"
 )
 
 //xpoURL is se to the test URL by default
@@ -240,6 +240,10 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 	httpClient := http.Client{
 		Timeout: timeout,
 	}
+
+	log.Println(string(jsonBytes))
+	log.Println("XPO Bearer Token:", bearerToken)
+
 	req, err := http.NewRequest("POST", xpoURL, bytes.NewReader(jsonBytes))
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	req.Header.Set("Content-Type", "application/json")
