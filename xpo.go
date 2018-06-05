@@ -312,7 +312,7 @@ func getRequestToken() (bearerToken string, err error) {
 	//headers set per xpo
 	req, err := http.NewRequest("POST", xpoTokenURL, bytes.NewBufferString(v.Encode()))
 	req.Header.Set("Authorization", "Basic "+accessToken)
-	req.Header.Set("Content-Type", "x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	//make the request
 	res, err := httpClient.Do(req)
