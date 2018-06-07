@@ -36,8 +36,8 @@ import (
 //api urls
 const (
 	xpoTokenURL      = "https://api.ltl.xpo.com/token"
-	xpoProductionURL = "https://api.ltl.xpo.com/1.0/cust-pickup-requests"
-	xpoTestURL       = "https://api.ltl.xpo.com/1.0/cust-pickup-requests?testMode=Y"
+	xpoProductionURL = "https://api.ltl.xpo.com/pickuprequest/1.0/cust-pickup-requests?testMode=N"
+	xpoTestURL       = "https://api.ltl.xpo.com/pickuprequest/1.0/cust-pickup-requests?testMode=Y"
 )
 
 //xpoURL is se to the test URL by default
@@ -92,7 +92,7 @@ type PickupRqstInfo struct {
 	Contact            Contact   `json:"contact"` //usually same as requestor.contact
 	Remarks            string    `json:"remarks"` //any random note
 	TotPalletCnt       uint      `json:"totPalletCnt"`
-	TotLoosePiecesCnt  uint      `json:"totLoosePiecesCnt"`
+	TotLoosePieceCnt   uint      `json:"totLoosePieceCnt"`
 	TotWeight          Weight    `json:"totWeight"`
 }
 
@@ -101,7 +101,8 @@ type Shipper struct {
 	//required
 	AddressLine1 string `json:"addressLine1"`
 	CityName     string `json:"cityName"`
-	StateCd      string `json:"stateCd"` //two character code
+	StateCd      string `json:"stateCd"`   //two character code
+	CountryCd    string `json:"countryCd"` //to char code
 
 	//optional
 	Name         string `json:"name"` //company name
@@ -133,7 +134,7 @@ type Email struct {
 //Phone holds an phone number
 //why this is a separate struct...ask XPO
 type Phone struct {
-	PhoneNbr string `json:"phoneNbr"`
+	PhoneNbr string `json:"phoneNbr"` //format is 999-999999
 }
 
 //PkupItem is the good being picked up
@@ -148,24 +149,28 @@ type PkupItem struct {
 	GarntInd       bool   `json:"garntInd"` //guaranteed service
 	HazmatInd      bool   `json:"hazmatInd"`
 	FrzbleInd      bool   `json:"frzbleInd"`
-	HolDlvrInd     bool   `json:"holDlvrInd"`   //holiday or weekend delivery requested
-	FoodInd        bool   `json:"foodInd"`      //food stuffs
-	BlkLiquidInd   bool   `json:"blkLiquidInd"` //bulk liquid shipment greater than 119 US gallons
-	Remarks        string `json:"remarks"`      //random note for this pickup
+	HolDlvrInd     bool   `json:"holDlvrInd"`    //holiday or weekend delivery requested
+	FoodInd        bool   `json:"foodInd"`       //food stuffs
+	BulkLiquidInd  bool   `json:"bulkLiquidInd"` //bulk liquid shipment greater than 119 US gallons
+	Remarks        string `json:"remarks"`       //random note for this pickup
 }
 
 //Weight holds a weight
 type Weight struct {
-	Weight float64 `json:"weight"`
+	Weight uint `json:"weight"` //int per XPO
 }
 
 //SuccessfulPickupResponse is the data returned when a pickup is scheduled
 type SuccessfulPickupResponse struct {
-	Code                 string `json:"code"`
-	TransactionTimestamp string `json:"transactionTimestamp"` //unix timestamp
-	Data                 struct {
-		ConfirmationNbr string `json:"confirmationNbr"` //pickup confirmation number
-	} `json:"data"`
+	Code                 string             `json:"code"`
+	TransactionTimestamp uint64             `json:"transactionTimestamp"` //unix timestamp
+	Data                 ConfirmationNumber `json:"data"`
+}
+
+//ConfirmationNumber holds the actual pickup request number
+type ConfirmationNumber struct {
+	PickupID        string `json:"pickupId"`
+	ConfirmationNbr string `json:"confirmationNbr"` //pickup confirmation number
 }
 
 //ErrorPickupResponse is the data returned when a pickup cannot be scheduled
@@ -197,7 +202,7 @@ func SetProductionMode(yes bool) {
 }
 
 //SetTimeout updates the timeout value to something the user sets
-//use this to increase the timeout if connecting to UPS is really slow
+//use this to increase the timeout if connecting to XPO is really slow
 func SetTimeout(seconds time.Duration) {
 	timeout = time.Duration(seconds * time.Second)
 	return
@@ -214,6 +219,19 @@ func SetCredentials(u, p, t string) {
 //RequestPickup performs the API call to schedule a pickup
 //requests to XPO require two steps: getting a token, and making the pickup request.  Why? b/c dumb.
 func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, err error) {
+	//calculate total weight, pallet count, number of pieces for all items
+	var totalSkids uint
+	var totalPieces uint
+	var totalWeight uint
+	for _, v := range pri.PkupItem {
+		totalSkids += v.PalletCnt
+		totalPieces += v.LoosePiecesCnt
+		totalWeight += v.TotWeight.Weight
+	}
+	pri.TotPalletCnt = totalSkids
+	pri.TotLoosePieceCnt = totalPieces
+	pri.TotWeight.Weight = totalWeight
+
 	//add the pickup request info to the pickup container object
 	pr := PickupRequest{
 		PickupRqstInfo: *pri,
@@ -236,14 +254,13 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 		return
 	}
 
+	// log.Println("XPO Bearer Token:", bearerToken)
+	// log.Println("XPO Test Mode:", xpoURL)
+
 	//make the call to XPO
 	httpClient := http.Client{
 		Timeout: timeout,
 	}
-
-	log.Println(string(jsonBytes))
-	log.Println("XPO Bearer Token:", bearerToken)
-
 	req, err := http.NewRequest("POST", xpoURL, bytes.NewReader(jsonBytes))
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -272,7 +289,7 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 			return
 		}
 
-		//return our error so we know where this error came from, and UPS error message so we know what to fix
+		//return error so we know we need to fix something
 		log.Printf("%+v", errorData)
 		err = errors.New(errorData.Description)
 		return
@@ -287,7 +304,7 @@ func (pri *PickupRqstInfo) RequestPickup() (response SuccessfulPickupResponse, e
 		var errorData ErrorPickupResponse
 		xml.Unmarshal(body, &errorData)
 
-		//return our error so we know where this error came from, and UPS error message so we know what to fix
+		//return our error so we know where this error came from, and xpo error message so we know what to fix
 		err = errors.New("xpo.RequestPickup - pickup request failed")
 		log.Println(errorData)
 		return
